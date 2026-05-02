@@ -34,7 +34,7 @@ class ThrottleController:
 
     def __init__(self):
         self.max_radius = 10000
-        self.max_speed = 1600
+        self.max_speed = 1675
         self.intended_distance_increment = [15] * 13
         self.dist_index = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         self.intended_target_distance = [0, 30, 60, 90, 120, 140, 170]
