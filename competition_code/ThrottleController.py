@@ -34,7 +34,7 @@ class ThrottleController:
 
     def __init__(self):
         self.max_radius = 10000
-        self.max_speed = 300
+        self.max_speed = 1750
         self.intended_distance_increment = [15] * 13
         self.dist_index = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         self.intended_target_distance = [0, 30, 60, 90, 120, 140, 170]
@@ -231,13 +231,14 @@ class ThrottleController:
                 brake_threshold_multiplier * true_percent_change_per_tick
             ):
                 if self.brake_ticks > 0:
+                    brake_value = self.get_scheduled_brake_value()
                     self.dprint(
                         "tb: tick "
                         + str(self.tick_counter)
                         + " brake: counter "
                         + str(self.brake_ticks)
                     )
-                    return -1, 1
+                    return -1, brake_value
 
                 # if speed is not decreasing fast, hit the brake.
                 if self.brake_ticks <= 0 and speed_change < 2.5:
@@ -252,7 +253,7 @@ class ThrottleController:
                         + " brake: initiate counter "
                         + str(self.brake_ticks)
                     )
-                    return -1, 1
+                    return -1, self.get_scheduled_brake_value()
 
                 else:
                     # speed is already dropping fast, ok to throttle because the effect of throttle is delayed
@@ -334,6 +335,15 @@ class ThrottleController:
                     + str(percent_speed_change)
                 )
                 return throttle_to_maintain, 0
+
+    def get_scheduled_brake_value(self):
+        if self.brake_ticks == 3:
+            return 0.9
+        if self.brake_ticks == 2:
+            return 0.8
+        if self.brake_ticks == 1:
+            return 0.7
+        return 1
 
     # used to detect when speed is dropping due to brakes applied earlier. speed delta has a steep negative slope.
     def isSpeedDroppingFast(self, percent_change_per_tick: float, current_speed):
