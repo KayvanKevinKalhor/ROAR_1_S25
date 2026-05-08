@@ -4,11 +4,11 @@ Please do not change anything else but fill out the to-do sections.
 """
 
 from collections import deque
-from functools import reduce
 import json
 import os
 from typing import List, Tuple, Dict, Optional
 import math
+import time
 import numpy as np
 import roar_py_interface
 from LateralController import LatController
@@ -21,6 +21,7 @@ import atexit
 
 useDebug = False
 useDebugPrinting = False
+profileStartup = False
 debugData = {}
 dbg_carLocations = []
 dbg_wpsToFollow = []
@@ -52,6 +53,22 @@ def filter_waypoints(
     return min_ind
 
 
+def filter_locations(location: np.ndarray, current_idx: int, locations: np.ndarray) -> int:
+    for i in range(current_idx, len(locations) + current_idx):
+        ind = i % len(locations)
+        if np.linalg.norm(location[:2] - locations[ind][:2]) < 3:
+            return ind
+    min_dist = 1000
+    min_ind = current_idx
+    for i in range(0, 20):
+        ind = (current_idx + i) % len(locations)
+        d = np.linalg.norm(location[:2] - locations[ind][:2])
+        if d < min_dist:
+            min_dist = d
+            min_ind = ind
+    return min_ind
+
+
 def findClosestIndex(location, waypoints: List[roar_py_interface.RoarPyWaypoint]):
     lowestDist = 100
     closestInd = 0
@@ -65,6 +82,9 @@ def findClosestIndex(location, waypoints: List[roar_py_interface.RoarPyWaypoint]
 
 @atexit.register
 def saveDebugData():
+    if not useDebug:
+        return
+
     print("Saving...")
     fname = "\\debugData\\line.txt"
     with open(
@@ -87,14 +107,21 @@ def saveDebugData():
             outfile.write(f"{line}\n")
     print(f"Saved. {fname}")
 
-    if useDebug:
-        print("Saving debug data")
-        jsonData = json.dumps(debugData, indent=4)
-        with open(
-            f"{os.path.dirname(__file__)}\\debugData\\debugData.json", "w+"
-        ) as outfile:
-            outfile.write(jsonData)
-        print("Debug Data Saved")
+    print("Saving debug data")
+    jsonData = json.dumps(debugData, indent=4)
+    with open(
+        f"{os.path.dirname(__file__)}\\debugData\\debugData.json", "w+"
+    ) as outfile:
+        outfile.write(jsonData)
+    print("Debug Data Saved")
+
+
+def profile_time(label: str, start_time: float) -> float:
+    if profileStartup:
+        now = time.perf_counter()
+        print(f"[startup] {label}: {(now - start_time):.3f}s")
+        return now
+    return start_time
 
 
 class RoarCompetitionSolution:
@@ -121,6 +148,7 @@ class RoarCompetitionSolution:
         self.throttle_controller = ThrottleController()
         self.section_stats = None
         self.section_indeces = []
+        self.waypoint_locations = None
         self.num_ticks = 0
         self.current_section = 0
         self.lapNum = 1
@@ -128,19 +156,28 @@ class RoarCompetitionSolution:
         self.max_radius = 10000
         self.previous_location = None
         self.total_dist = 0
-        self.waypoint_line = WaypointLine()
+        self.waypoint_line = None
         self.previous_brake = False
         self.s3_mult = 1
 
     async def initialize(self) -> None:
+        startup_time = time.perf_counter()
         # NOTE waypoints are changed through this line
         self.maneuverable_waypoints = (
             roar_py_interface.RoarPyWaypoint.load_waypoint_list(
                 np.load(f"{os.path.dirname(__file__)}\\waypoints\\waypointsPrimary.npz")
             )[35:]
         )
-        self.section_stats = SectionStats(
-            self.maneuverable_waypoints, self.location_sensor, self.velocity_sensor)
+        self.waypoint_locations = np.asarray(
+            [waypoint.location for waypoint in self.maneuverable_waypoints],
+            dtype=np.float64,
+        )
+        startup_time = profile_time("waypoints loaded", startup_time)
+
+        if useDebug:
+            self.section_stats = SectionStats(
+                self.maneuverable_waypoints, self.location_sensor, self.velocity_sensor)
+            startup_time = profile_time("section stats initialized", startup_time)
 
         sectionLocations = [
             [-278, 372], # Section 0 start location
@@ -171,10 +208,18 @@ class RoarCompetitionSolution:
         vehicle_velocity = self.velocity_sensor.get_last_gym_observation()
 
         self.current_waypoint_idx = 0
-        self.current_waypoint_idx = filter_waypoints(
-            vehicle_location, self.current_waypoint_idx, self.maneuverable_waypoints
+        self.current_waypoint_idx = filter_locations(
+            vehicle_location, self.current_waypoint_idx, self.waypoint_locations
         )
         self.previous_location = vehicle_location
+        profile_time("initialize complete", startup_time)
+
+    def get_waypoint_line(self):
+        if self.waypoint_line is None:
+            start_time = time.perf_counter()
+            self.waypoint_line = WaypointLine()
+            profile_time("waypoint line loaded", start_time)
+        return self.waypoint_line
 
 
     async def step(self) -> None:
@@ -184,7 +229,8 @@ class RoarCompetitionSolution:
         You can do whatever you want here, including apply_action() to the vehicle.
         """
         self.num_ticks += 1
-        self.section_stats.step()
+        if self.section_stats is not None:
+            self.section_stats.step()
 
         # Receive location, rotation and velocity data
         vehicle_location = self.location_sensor.get_last_gym_observation()
@@ -194,8 +240,8 @@ class RoarCompetitionSolution:
         current_speed_kmh = vehicle_velocity_norm * 3.6
 
         # Find the waypoint closest to the vehicle
-        self.current_waypoint_idx = filter_waypoints(
-            vehicle_location, self.current_waypoint_idx, self.maneuverable_waypoints
+        self.current_waypoint_idx = filter_locations(
+            vehicle_location, self.current_waypoint_idx, self.waypoint_locations
         )
 
         for i, section_ind in enumerate(self.section_indeces):
@@ -210,8 +256,8 @@ class RoarCompetitionSolution:
         nextWaypointIndex = self.get_lookahead_index(current_speed_kmh)
         waypoint_to_follow = self.next_waypoint_smooth(current_speed_kmh, vehicle_location)
         waypoint_to_follow_location = waypoint_to_follow.location
-        snap_to_line_location = self.waypoint_line.get_next_waypoint_location(waypoint_to_follow.location)
         if self.current_section  not in [0, 9]:
+            snap_to_line_location = self.get_waypoint_line().get_next_waypoint_location(waypoint_to_follow.location)
             waypoint_to_follow_location = snap_to_line_location
 
         # Pure pursuit controller to steer the vehicle
@@ -249,7 +295,8 @@ class RoarCompetitionSolution:
                     self.previous_brake = True
             if current_speed_kmh < 160:
                 self.s3_mult = 0.75
-            print(f"spd {current_speed_kmh} mult{self.s3_mult} sec={self.current_section}")
+            if useDebugPrinting:
+                print(f"spd {current_speed_kmh} mult{self.s3_mult} sec={self.current_section}")
         if self.current_waypoint_idx in [802, 803, 804]:
             self.previous_brake = False
 
@@ -415,21 +462,21 @@ loc: ({vehicle_location[0]:.2f}, {vehicle_location[1]:.2f}) wp({wpl[0]:.1f}, {wp
             kdd = 0.25
             distance = kdd * current_speed
             distance = np.clip(distance, 44, 70)
-            location, _ = self.waypoint_line.get_lookahead_location(vehicle_location, distance)
+            location, _ = self.get_waypoint_line().get_lookahead_location(vehicle_location, distance)
             point = roar_py_interface.RoarPyWaypoint(location, roll_pitch_yaw=np.ndarray([0, 0, 0]), lane_width=0.0)
             return point
         if self.current_section in [5, 7]:
             kdd = 0.25
             distance = kdd * current_speed
             distance = np.clip(distance, 30, 70)
-            location, _ = self.waypoint_line.get_lookahead_location(vehicle_location, distance)
+            location, _ = self.get_waypoint_line().get_lookahead_location(vehicle_location, distance)
             point = roar_py_interface.RoarPyWaypoint(location, roll_pitch_yaw=np.ndarray([0, 0, 0]), lane_width=0.0)
             return point
         if self.current_section in [6]:
             kdd = 0.28
             distance = kdd * current_speed
             distance = np.clip(distance, 30, 70)
-            location, _ = self.waypoint_line.get_lookahead_location(vehicle_location, distance)
+            location, _ = self.get_waypoint_line().get_lookahead_location(vehicle_location, distance)
             point = roar_py_interface.RoarPyWaypoint(location, roll_pitch_yaw=np.ndarray([0, 0, 0]), lane_width=0.0)
             return point
         if current_speed > 70 and current_speed < 300:
@@ -487,12 +534,8 @@ loc: ({vehicle_location[0]:.2f}, {vehicle_location[1]:.2f}) wp({wpl[0]:.1f}, {wp
             for i in range(0, num_points)
         ]
         if num_points > 3:
-            location_sum = reduce(
-                lambda x, y: x + y,
-                (self.maneuverable_waypoints[i].location for i in sample_points),
-            )
             num_points = len(sample_points)
-            new_location = location_sum / num_points
+            new_location = np.mean(self.waypoint_locations[sample_points], axis=0)
             shift_distance = np.linalg.norm(next_location - new_location)
             max_shift_distance = 2.0
             if self.current_section == 1:

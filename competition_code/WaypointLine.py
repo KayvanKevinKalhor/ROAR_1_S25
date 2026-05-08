@@ -1,9 +1,11 @@
 import numpy as np
+import os
 
 class WaypointLine:
     def __init__(self):
         self.prev_index = 0
-        self.line_locations = self.parse_waypoints()
+        self.is_initialized = False
+        self.line_locations = self.load_waypoints()
 
     def get_next_waypoint_location(self, target_location):
         # returns waypoint location on the line which is 'close' to the target_location.
@@ -12,20 +14,35 @@ class WaypointLine:
         return self.line_locations[ind]
     
     def find_closest_index(self, target_location):
+        if not self.is_initialized:
+            distances = np.linalg.norm(self.line_locations[:, :2] - target_location[:2], axis=1)
+            self.is_initialized = True
+            return int(np.argmin(distances))
+
         loc_len = len(self.line_locations)
         prev_ind = self.prev_index
         prev_dist = 10000
+        best_ind = prev_ind
+        best_dist = prev_dist
         for i in range(100):
             ind = (self.prev_index + loc_len - 50 + i) % loc_len
             loc = self.line_locations[ind]
             dist = np.linalg.norm(target_location[:2] - loc[:2])
+            if dist < best_dist:
+                best_ind = ind
+                best_dist = dist
             if dist > prev_dist:
+                if prev_dist > 25:
+                    distances = np.linalg.norm(self.line_locations[:, :2] - target_location[:2], axis=1)
+                    return int(np.argmin(distances))
                 return prev_ind
             prev_ind = ind
             prev_dist = dist
         
-        print(f"return t_loc {target_location[0]}, {target_location[1]} ind{prev_ind} dist{prev_dist}")
-        return target_location
+        if best_dist > 25:
+            distances = np.linalg.norm(self.line_locations[:, :2] - target_location[:2], axis=1)
+            return int(np.argmin(distances))
+        return best_ind
 
     def get_lookahead_location(self, current_location, distance):
         loc_len = len(self.line_locations)
@@ -53,6 +70,12 @@ class WaypointLine:
             except ValueError:
                 print(f"Invalid coordinate format: {line}")
         return wps
+
+    def load_waypoints(self):
+        cache_path = os.path.join(os.path.dirname(__file__), "waypoints", "line_locations.npy")
+        if os.path.exists(cache_path):
+            return np.load(cache_path)
+        return np.asarray(self.parse_waypoints(), dtype=np.float64)
 
 WP_TO_FOLLOW ="""
 -310.5117309441614, 474.6422067188116
